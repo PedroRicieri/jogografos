@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestor de Metrô - Jogo de Grafos</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #f0f0f0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #333;
+        }
+        canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            pointer-events: none; /* Deixa o clique passar para o canvas */
+        }
+        h1 { margin: 0 0 10px 0; font-size: 20px; }
+        p { margin: 5px 0; font-size: 16px; font-weight: bold; }
+        #gameOver {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #ff4757;
+            color: white;
+            padding: 30px 50px;
+            border-radius: 12px;
+            text-align: center;
+            font-size: 24px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>Gestor de Metrô</h1>
+        <p>Passageiros Salvos: <span id="score">0</span></p>
+        <p style="font-size: 12px; font-weight: normal; margin-top: 10px; color: #666;">
+            • Arraste de uma estação a outra para criar trilhos.<br>
+            • Limite de 6 passageiros por estação.
+        </p>
+    </div>
+
+    <div id="gameOver">
+        <h2>Fim de Jogo!</h2>
+        <p>Uma estação ficou superlotada.</p>
+        <button onclick="location.reload()" style="padding: 10px 20px; font-size: 16px; cursor: pointer; border: none; border-radius: 6px; background: white; color: #ff4757; font-weight: bold;">Tentar Novamente</button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreElement = document.getElementById('score');
+        const gameOverElement = document.getElementById('gameOver');
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Tipos de vértices/passageiros
+        const SHAPES = ['circle', 'square', 'triangle'];
+        const COLORS = {
+            'circle': '#1e90ff',
+            'square': '#ffa502',
+            'triangle': '#2ed573'
+        };
+
+        // --- ESTRUTURA DE GRAFOS ---
+        
+        class Grafo {
+            constructor() {
+                this.estacoes = new Map(); // Nós (Vértices)
+                this.adjLista = new Map(); // Lista de Adjacência
+                this.arestas = [];         // Para renderização visual
+                this.proximoId = 1;
+            }
+
+            adicionarEstacao(x, y, tipo) {
+                const id = this.proximoId++;
+                const estacao = { id, x, y, tipo, passageiros: [] };
+                this.estacoes.set(id, estacao);
+                this.adjLista.set(id, new Set());
+                return id;
+            }
+
+            adicionarTrilho(id1, id2) {
+                if (id1 === id2) return;
+                // Previne trilhos duplicados
+                if (this.adjLista.get(id1).has(id2)) return;
+
+                // Grafo não-direcionado (vai e volta)
+                this.adjLista.get(id1).add(id2);
+                this.adjLista.get(id2).add(id1);
+                
+                this.arestas.push({ 
+                    origem: this.estacoes.get(id1), 
+                    destino: this.estacoes.get(id2) 
+                });
+            }
+
+            // ALGORITMO: Busca em Largura (BFS) para encontrar rota
+            encontrarCaminho(idOrigem, tipoDestino) {
+                const fila = [idOrigem];
+                const visitados = new Set([idOrigem]);
+                
+                while (fila.length > 0) {
+                    const atualId = fila.shift();
+                    const atualEstacao = this.estacoes.get(atualId);
+
+                    // Se a estação atual é do tipo que o passageiro quer, achamos o caminho!
+                    if (atualId !== idOrigem && atualEstacao.tipo === tipoDestino) {
+                        return true; 
+                    }
+
+                    // Explora vizinhos
+                    for (let vizinhoId of this.adjLista.get(atualId)) {
+                        if (!visitados.has(vizinhoId)) {
+                            visitados.add(vizinhoId);
+                            fila.push(vizinhoId);
+                        }
+                    }
+                }
+                return false; // Não há rota possível
+            }
+        }
+
+        // --- ESTADO DO JOGO ---
+
+        const grafo = new Grafo();
+        let score = 0;
+        let isGameOver = false;
+        
+        // Interação com Mouse
+        let draggingStation = null;
+        let mouseX = 0;
+        let mouseY = 0;
+
+        // Configurações de Spawn
+        const SPAWN_STATION_INTERVAL = 6000;
+        const SPAWN_PASSENGER_INTERVAL = 2500;
+        let lastStationSpawn = 0;
+        let lastPassengerSpawn = 0;
+
+        // Estações iniciais
+        grafo.adicionarEstacao(canvas.width * 0.3, canvas.height * 0.5, 'circle');
+        grafo.adicionarEstacao(canvas.width * 0.7, canvas.height * 0.5, 'square');
+        grafo.adicionarEstacao(canvas.width * 0.5, canvas.height * 0.2, 'triangle');
+
+        // --- FUNÇÕES DE RENDERIZAÇÃO ---
+
+        function drawShape(ctx, x, y, tipo, color, size, isOutline = false) {
+            ctx.beginPath();
+            ctx.fillStyle = isOutline ? 'white' : color;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+
+            if (tipo === 'circle') {
+                ctx.arc(x, y, size, 0, Math.PI * 2);
+            } else if (tipo === 'square') {
+                ctx.rect(x - size, y - size, size * 2, size * 2);
+            } else if (tipo === 'triangle') {
+                ctx.moveTo(x, y - size);
+                ctx.lineTo(x + size, y + size);
+                ctx.lineTo(x - size, y + size);
+                ctx.closePath();
+            }
+
+            if (isOutline) {
+                ctx.fill();
+                ctx.stroke();
+            } else {
+                ctx.fill();
+            }
+        }
+
+        function render() {
+            if (isGameOver) return;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 1. Desenhar Trilhos (Arestas)
+            ctx.lineWidth = 6;
+            ctx.strokeStyle = '#999';
+            for (let aresta of grafo.arestas) {
+                ctx.beginPath();
+                ctx.moveTo(aresta.origem.x, aresta.origem.y);
+                ctx.lineTo(aresta.destino.x, aresta.destino.y);
+                ctx.stroke();
+            }
+
+            // Desenhar trilho fantasma enquanto arrasta
+            if (draggingStation) {
+                ctx.beginPath();
+                ctx.moveTo(draggingStation.x, draggingStation.y);
+                ctx.lineTo(mouseX, mouseY);
+                ctx.strokeStyle = '#2f3542';
+                ctx.stroke();
+            }
+
+            // 2. Desenhar Estações (Vértices)
+            for (let [id, estacao] of grafo.estacoes) {
+                drawShape(ctx, estacao.x, estacao.y, estacao.tipo, COLORS[estacao.tipo], 20, true);
+
+                // 3. Desenhar Passageiros na estação
+                const maxPerRow = 3;
+                estacao.passageiros.forEach((passageiro, index) => {
+                    const px = estacao.x + 30 + (index % maxPerRow) * 15;
+                    const py = estacao.y - 15 + Math.floor(index / maxPerRow) * 15;
+                    drawShape(ctx, px, py, passageiro.tipo, COLORS[passageiro.tipo], 6, false);
+                });
+            }
+        }
+
+        // --- LÓGICA DO JOGO ---
+
+        function update(timestamp) {
+            if (isGameOver) return;
+
+            // Spawn de nova estação
+            if (timestamp - lastStationSpawn > SPAWN_STATION_INTERVAL) {
+                const pad = 100;
+                const x = pad + Math.random() * (canvas.width - pad * 2);
+                const y = pad + Math.random() * (canvas.height - pad * 2);
+                const tipo = SHAPES[Math.floor(Math.random() * SHAPES.length)];
+                grafo.adicionarEstacao(x, y, tipo);
+                lastStationSpawn = timestamp;
+            }
+
+            // Spawn de novos passageiros
+            if (timestamp - lastPassengerSpawn > SPAWN_PASSENGER_INTERVAL) {
+                const estacoesArr = Array.from(grafo.estacoes.values());
+                const randomStation = estacoesArr[Math.floor(Math.random() * estacoesArr.length)];
+                
+                // Escolhe um destino que não seja o tipo da estação atual
+                let tipoDestino;
+                do {
+                    tipoDestino = SHAPES[Math.floor(Math.random() * SHAPES.length)];
+                } while (tipoDestino === randomStation.tipo);
+
+                randomStation.passageiros.push({ tipo: tipoDestino });
+                lastPassengerSpawn = timestamp;
+            }
+
+            // Lógica de Roteamento de Passageiros usando BFS
+            for (let [id, estacao] of grafo.estacoes) {
+                if (estacao.passageiros.length > 6) {
+                    isGameOver = true;
+                    gameOverElement.style.display = 'block';
+                    return; // Fim de jogo
+                }
+
+                // Tenta embarcar passageiros
+                for (let i = estacao.passageiros.length - 1; i >= 0; i--) {
+                    const passageiro = estacao.passageiros[i];
+                    
+                    // ALGORITMO NA PRÁTICA: O passageiro verifica se existe caminho (BFS)
+                    if (grafo.encontrarCaminho(id, passageiro.tipo)) {
+                        estacao.passageiros.splice(i, 1); // Passageiro embarca
+                        score++;
+                        scoreElement.innerText = score;
+                    }
+                }
+            }
+
+            render();
+            requestAnimationFrame(update);
+        }
+
+        // --- CONTROLES ---
+
+        function getEstacaoClicada(x, y) {
+            for (let [id, estacao] of grafo.estacoes) {
+                const dx = x - estacao.x;
+                const dy = y - estacao.y;
+                if (Math.sqrt(dx * dx + dy * dy) < 25) {
+                    return estacao;
+                }
+            }
+            return null;
+        }
+
+        window.addEventListener('mousedown', (e) => {
+            const clicada = getEstacaoClicada(e.clientX, e.clientY);
+            if (clicada) draggingStation = clicada;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        });
+
+        window.addEventListener('mouseup', (e) => {
+            if (draggingStation) {
+                const alvo = getEstacaoClicada(e.clientX, e.clientY);
+                if (alvo && alvo.id !== draggingStation.id) {
+                    grafo.adicionarTrilho(draggingStation.id, alvo.id);
+                }
+                draggingStation = null;
+            }
+        });
+
+        // Inicia o Loop
+        requestAnimationFrame(update);
+
+    </script>
+</body>
+</html>
